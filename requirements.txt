@@ -2,3 +2,9 @@ curl_cffi
 beautifulsoup4
 python-dotenv
 requests
+
+# Turnstile Solver (api_solver.py)
+quart
+camoufox
+patchright
+rich

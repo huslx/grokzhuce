@@ -9,13 +9,21 @@ from g import EmailService, TurnstileService, UserAgreementService, NsfwSettings
 
 # 基础配置
 site_url = "https://accounts.x.ai"
-DEFAULT_IMPERSONATE = "chrome120"
+# Cloudflare 会拦截旧 TLS 指纹（chrome120 等返回 403），优先用较新版本
+DEFAULT_IMPERSONATE = "chrome136"
+IMPERSONATE_CANDIDATES = [
+    "chrome136",
+    "chrome133a",
+    "chrome131",
+    "chrome124",
+    "chrome120",
+    "safari18_0",
+]
 CHROME_PROFILES = [
-    {"impersonate": "chrome110", "version": "110.0.0.0", "brand": "chrome"},
-    {"impersonate": "chrome119", "version": "119.0.0.0", "brand": "chrome"},
-    {"impersonate": "chrome120", "version": "120.0.0.0", "brand": "chrome"},
-    {"impersonate": "edge99", "version": "99.0.1150.36", "brand": "edge"},
-    {"impersonate": "edge101", "version": "101.0.1210.47", "brand": "edge"},
+    {"impersonate": "chrome136", "version": "136.0.0.0", "brand": "chrome"},
+    {"impersonate": "chrome133a", "version": "133.0.0.0", "brand": "chrome"},
+    {"impersonate": "chrome131", "version": "131.0.0.0", "brand": "chrome"},
+    {"impersonate": "chrome124", "version": "124.0.0.0", "brand": "chrome"},
 ]
 def get_random_chrome_profile():
     profile = random.choice(CHROME_PROFILES)
@@ -289,37 +297,96 @@ def register_single_thread():
                 current_email = None
             time.sleep(5)
 
+def _extract_action_candidates(js_content: str):
+    """从 Next.js chunk 提取 (action_id, name) 候选。"""
+    patterns = [
+        r'createServerReference\)\("([a-f0-9]{40,44})"[^)]*"([^"]*)"\)',
+        r'createServerReference\("([a-f0-9]{40,44})"[^)]*"([^"]*)"\)',
+    ]
+    found = []
+    for pat in patterns:
+        found.extend(re.findall(pat, js_content))
+    # 兼容旧版：以 7f 开头的 42 位 hex
+    for m in re.findall(r'\b(7f[a-fA-F0-9]{40})\b', js_content):
+        found.append((m, "legacy7f"))
+    return found
+
+
+def _pick_action_id(candidates):
+    """优先 default（注册表单），其次 7f 前缀，跳过 getSession 等无关 action。"""
+    if not candidates:
+        return None
+    skip = {"getsession", "session", "get_session"}
+    usable = [(aid, name) for aid, name in candidates if name.lower() not in skip]
+    if not usable:
+        usable = candidates
+    for aid, name in usable:
+        if name == "default":
+            return aid
+    for aid, name in usable:
+        if aid.startswith("7f") or name == "legacy7f":
+            return aid
+    return usable[0][0]
+
+
+def _fetch_signup_html():
+    """尝试多个 TLS 指纹拿到注册页 HTML（避免 Cloudflare 403）。"""
+    last_err = None
+    for imp in IMPERSONATE_CANDIDATES:
+        try:
+            with requests.Session(impersonate=imp) as s:
+                res = s.get(f"{site_url}/sign-up", timeout=30)
+                if res.status_code == 200 and "_next/static" in res.text:
+                    return res.text, imp
+                last_err = f"{imp} -> HTTP {res.status_code}"
+        except Exception as e:
+            last_err = f"{imp} -> {e}"
+    raise RuntimeError(last_err or "无法访问注册页")
+
+
 def main():
     print("=" * 60 + "\nGrok 注册机\n" + "=" * 60)
     
     # 1. 扫描参数
     print("[*] 正在初始化...")
     start_url = f"{site_url}/sign-up"
-    with requests.Session(impersonate=DEFAULT_IMPERSONATE) as s:
-        try:
-            html = s.get(start_url).text
-            # Key
-            key_match = re.search(r'sitekey":"(0x4[a-zA-Z0-9_-]+)"', html)
-            if key_match: config["site_key"] = key_match.group(1)
-            # Tree
-            tree_match = re.search(r'next-router-state-tree":"([^"]+)"', html)
-            if tree_match: config["state_tree"] = tree_match.group(1)
-            # Action ID
-            soup = BeautifulSoup(html, 'html.parser')
-            js_urls = [urljoin(start_url, script['src']) for script in soup.find_all('script', src=True) if '_next/static' in script['src']]
+    try:
+        html, used_imp = _fetch_signup_html()
+        print(f"[+] 注册页可访问 (impersonate={used_imp})")
+
+        # Key（HTML 或默认值）
+        key_match = re.search(r'(0x4[A-Za-z0-9_-]{20,})', html)
+        if key_match:
+            config["site_key"] = key_match.group(1)
+        # Tree
+        tree_match = re.search(r'next-router-state-tree":"([^"]+)"', html)
+        if tree_match:
+            config["state_tree"] = tree_match.group(1)
+
+        # Action ID：扫描 Next.js 静态脚本，收集全部候选后再挑选
+        soup = BeautifulSoup(html, 'html.parser')
+        js_urls = [
+            urljoin(start_url, script['src'])
+            for script in soup.find_all('script', src=True)
+            if '_next/static' in script.get('src', '')
+        ]
+        candidates = []
+        with requests.Session(impersonate=used_imp) as s:
             for js_url in js_urls:
-                js_content = s.get(js_url).text
-                match = re.search(r'7f[a-fA-F0-9]{40}', js_content)
-                if match:
-                    config["action_id"] = match.group(0)
-                    print(f"[+] Action ID: {config['action_id']}")
-                    break
-        except Exception as e:
-            print(f"[-] 初始化扫描失败: {e}")
-            return
+                try:
+                    js_content = s.get(js_url, timeout=30).text
+                except Exception:
+                    continue
+                candidates.extend(_extract_action_candidates(js_content))
+        config["action_id"] = _pick_action_id(candidates)
+        if config["action_id"]:
+            print(f"[+] Action ID: {config['action_id']}")
+    except Exception as e:
+        print(f"[-] 初始化扫描失败: {e}")
+        return
 
     if not config["action_id"]:
-        print("[-] 错误: 未找到 Action ID")
+        print("[-] 错误: 未找到 Action ID（可能页面被 Cloudflare 拦截，或前端结构已变更）")
         return
 
     # 2. 启动

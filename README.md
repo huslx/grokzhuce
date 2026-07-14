@@ -20,7 +20,7 @@
 | `api_solver.py` | Turnstile 验证码解决器 |
 | `browser_configs.py` | 浏览器指纹配置 |
 | `db_results.py` | 验证结果存储 |
-| `g/email_service.py` | 临时邮箱服务（freemail API） |
+| `g/email_service.py` | 临时邮箱服务（cloudflare_temp_email） |
 | `g/turnstile_service.py` | Turnstile 验证服务 |
 | `g/user_agreement_service.py` | 用户协议同意服务 |
 | `g/nsfw_service.py` | NSFW 设置服务 |
@@ -29,7 +29,7 @@
 
 ## 依赖
 
-- [freemail](https://github.com/user/freemail) - 临时邮箱服务（需自行部署）
+- [cloudflare_temp_email](https://github.com/dreamhunter2333/cloudflare_temp_email) - 临时邮箱服务（通过 `MAIL_BASE_URL` 配置）
 - Turnstile Solver - 内置验证码解决方案
 
 ## 安装
@@ -50,8 +50,10 @@ cp .env.example .env
 
 | 配置项 | 说明 |
 |--------|------|
-| WORKER_DOMAIN | freemail 服务域名 |
-| FREEMAIL_TOKEN | freemail JWT Token |
+| MAIL_BASE_URL | 临时邮箱服务地址（必填，如 `https://mail.example.com`） |
+| MAIL_ADMIN_PASSWORD | Admin 密码（对应 worker 的 `ADMIN_PASSWORDS` / 请求头 `x-admin-auth`） |
+| MAIL_DOMAIN | 邮箱域名（必填，如 `example.com`） |
+| MAIL_SITE_PASSWORD | 站点密码（可选，启用 `x-custom-auth` 时填写） |
 | YESCAPTCHA_KEY | YesCaptcha API Key（可选，不填使用本地 Solver） |
 
 ## 使用
@@ -100,6 +102,6 @@ Grok 注册机
 
 ## 注意事项
 
-- 需要自行部署 freemail 临时邮箱服务
+- 需可用的 cloudflare_temp_email 服务，并在 `.env` 中配置 `MAIL_BASE_URL` / `MAIL_DOMAIN`
 - 运行前必须先启动 Turnstile Solver
 - 仅供学习研究使用
