@@ -18,3 +18,7 @@ keys/
 .ace-tool/
 .claude/
 .playwright-mcp/
+grok-reset-pwd.md
+cf_email_log.json
+email_sso.json
+email.json
