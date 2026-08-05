@@ -1,18 +1,25 @@
 #!/usr/bin/env python3
 """Grok / xAI 协议批量重置密码。
 
-流程（严格对齐 grok-reset-pwd.md）:
+流程:
   1. GET /reset-password?email=...&_rsc=...  — 触发重置（本身就会发 1 封验证码）
   2. 从临时邮箱拉取验证码
   3. VerifyEmailValidationCode              — 校验验证码
-  4. ResetPasswordByEmailValidationCode     — 设置新密码，拿到 session / one-time tokens
-  5. createSessionRedirectUrl + set-cookie  — 兑换 sso cookie
+  4. ResetPasswordByEmailValidationCode     — 设置新密码，响应里直接取 sso JWT
 
-注意: 不要再额外调 CreateEmailValidationCode，也不要重复 GET reset-password，
-否则会触发多封验证码邮件 / 限流。
+注意:
+  - 不要再额外调 CreateEmailValidationCode，也不要重复 GET reset-password，
+    否则会触发多封验证码邮件 / 限流。
+  - 不再调用 createSessionRedirectUrl / redeem_session：该步在 xAI 当前部署
+    上会再次补发一封验证码邮件，而 sso JWT 已可直接从设密响应中提取。
 
-邮箱列表: email.json
-新密码:   .env 中的 ACCOUNT_PASSWORD
+ 邮箱列表: email.json
+ 新密码:   .env 中的 ACCOUNT_PASSWORD
+
+默认行为:
+  - email_sso.json 中已有 success=true 记录的邮箱 → 跳过，不再重置
+  - 无记录或 success=false（失败）的邮箱 → 继续重置
+  - 可用 --no-skip-success 关闭跳过
 """
 
 from __future__ import annotations
@@ -47,9 +54,8 @@ IMPERSONATE_CANDIDATES = [
     "chrome124",
 ]
 
-# ResetPassword 页上的 Next.js server actions（部署变更时会自动重新扫描）
-ACTION_GET_NUM_ONE_TIME_LINKS = "000d891957a2aca768f69f922e12e8bb29544af5fc"
-ACTION_CREATE_SESSION_REDIRECT = "40cdaa12347b889d43db4a2e9a1fac71bc76ecf7d1"
+# ResetPassword 页上的 Next.js server action（部署变更时会自动重新扫描）
+ACTION_GET_NUM_ONE_TIME_LINKS = "00cdb835246d03ce4702a85ced485c82e4eaf3381c"
 
 # ResetPasswordByEmailValidationCodeRequest:
 #   1 email_validation_code
@@ -70,7 +76,7 @@ fail_count = 0
 start_time = time.time()
 stop_event = threading.Event()
 
-# 结果落盘：email_sso.json  (list[{email, success, sso, sso_rw, password, error, updated_at}])
+# 结果落盘：email_sso.json  ({邮箱: {success, sso, password, error, updated_at}})
 RESULT_JSON = "email_sso.json"
 _results: dict[str, dict] = {}
 
@@ -146,26 +152,6 @@ def extract_jwt_strings(data: bytes) -> list[str]:
         rb"eyJ[A-Za-z0-9_\-]+=*\.eyJ[A-Za-z0-9_\-]+[=]*\.[A-Za-z0-9_\-]+",
         data,
     )
-
-
-def extract_one_time_tokens(data: bytes) -> list[str]:
-    """从 CreateSessionResponse 中提取 one_time_link_tokens（长随机串）。"""
-    # 跳过 JWT，抓取看起来像 token 的长 ascii 串
-    tokens = []
-    for m in re.finditer(rb"[\x20-\x7e]{40,200}", data):
-        s = m.group(0).decode("ascii", errors="ignore")
-        if s.startswith("eyJ"):
-            continue
-        if re.fullmatch(r"[A-Za-z0-9_\-]{40,200}", s):
-            tokens.append(s)
-    # 去重保序
-    seen = set()
-    out = []
-    for t in tokens:
-        if t not in seen:
-            seen.add(t)
-            out.append(t)
-    return out
 
 
 # --------------- mail admin helpers ---------------
@@ -419,8 +405,8 @@ def reset_password(
     code: str,
     password: str,
     num_links: int = 2,
-) -> tuple[Optional[str], list[str]]:
-    """返回 (sso_jwt, one_time_tokens)。"""
+) -> Optional[str]:
+    """设置新密码，返回响应中直接提取的 sso JWT。"""
     # 验证码保留原始格式优先
     code_variants = [code, code.replace("-", "")]
     url = f"{SITE_URL}/auth_mgmt.AuthManagement/ResetPasswordByEmailValidationCode"
@@ -447,71 +433,25 @@ def reset_password(
                 continue
             data = body or res.content
             jwts = [j.decode() for j in extract_jwt_strings(data)]
-            tokens = extract_one_time_tokens(data)
-            sso = jwts[0] if jwts else None
-            if sso or tokens:
-                return sso, tokens
-            last_err = "响应中无 token"
+            if jwts:
+                return jwts[0]
+            last_err = "响应中无 sso JWT"
         except Exception as e:
             last_err = str(e)
     log(f"[-] {email} 重置密码失败: {last_err}")
-    return None, []
+    return None
 
 
-def redeem_session(
-    session: creq.Session,
-    email: str,
-    tokens: list[str],
-    action_id: str,
-) -> tuple[Optional[str], Optional[str]]:
-    """用 oneTimeLinkTokens 换 sso / sso-rw cookie。"""
-    if not tokens:
-        return None, None
+def discover_get_num_action(session: creq.Session) -> str:
+    """扫描 reset-password 页里的 getNumOneTimeLinks next-action id。
+
+    不带 email 参数访问页面，避免额外触发一封重置验证码邮件。
+    """
+    action_id = ACTION_GET_NUM_ONE_TIME_LINKS
     try:
-        res = session.post(
-            f"{SITE_URL}/reset-password",
-            params={"email": email},
-            headers={
-                "accept": "text/x-component",
-                "content-type": "text/plain;charset=UTF-8",
-                "next-action": action_id,
-                "origin": SITE_URL,
-                "referer": f"{SITE_URL}/reset-password?email={quote(email)}",
-            },
-            data=json.dumps(tokens),
-            timeout=30,
-        )
-        # 匹配 set-cookie 兑换链接（与 grok.py 注册流程一致）
-        match = re.search(r'(https://[^"\s]+set-cookie\?q=[^:"\s]+)', res.text)
-        if match:
-            verify_url = match.group(1)
-            # 响应里有时被截断多一个尾字符
-            if verify_url.endswith("1"):
-                # 兼容 grok.py 的 group 写法
-                m2 = re.search(r'(https://[^"\s]+set-cookie\?q=[^:"\s]+)1:', res.text)
-                if m2:
-                    verify_url = m2.group(1)
-            try:
-                session.get(verify_url, allow_redirects=True, timeout=30)
-            except Exception:
-                pass
-
-        sso = session.cookies.get("sso")
-        sso_rw = session.cookies.get("sso-rw")
-        return sso, sso_rw
-    except Exception as e:
-        log(f"[-] {email} 兑换 session 异常: {e}")
-        return None, None
-
-
-def discover_actions(session: creq.Session) -> tuple[str, str]:
-    """从 reset-password 页扫描 next-action id。"""
-    get_num = ACTION_GET_NUM_ONE_TIME_LINKS
-    create_redir = ACTION_CREATE_SESSION_REDIRECT
-    try:
-        res = session.get(f"{SITE_URL}/reset-password?email=probe%40example.com", timeout=30)
+        res = session.get(f"{SITE_URL}/reset-password", timeout=30)
         if res.status_code != 200:
-            return get_num, create_redir
+            return action_id
         from bs4 import BeautifulSoup
         from urllib.parse import urljoin
 
@@ -521,7 +461,6 @@ def discover_actions(session: creq.Session) -> tuple[str, str]:
             for sc in soup.find_all("script", src=True)
             if "_next/static" in sc.get("src", "")
         ]
-        cands = []
         for ju in js_urls:
             try:
                 t = session.get(ju, timeout=20).text
@@ -531,15 +470,12 @@ def discover_actions(session: creq.Session) -> tuple[str, str]:
                 r'createServerReference\)\("([a-f0-9]{40,44})"[^)]*"([^"]*)"\)',
                 r'createServerReference\("([a-f0-9]{40,44})"[^)]*"([^"]*)"\)',
             ):
-                cands.extend(re.findall(pat, t))
-        for aid, name in cands:
-            if name == "getNumOneTimeLinks":
-                get_num = aid
-            elif name == "createSessionRedirectUrl":
-                create_redir = aid
+                for aid, name in re.findall(pat, t):
+                    if name == "getNumOneTimeLinks":
+                        return aid
     except Exception as e:
         log(f"[!] action 扫描失败，使用内置默认值: {e}")
-    return get_num, create_redir
+    return action_id
 
 
 def open_session():
@@ -587,12 +523,13 @@ def load_results(path: str = RESULT_JSON) -> dict[str, dict]:
 
 
 def save_results(path: str = RESULT_JSON) -> None:
-    """按 email.json 出现顺序写 list；未处理的不会出现。"""
-    items = list(_results.values())
-    # 成功的排前面，其次按 updated_at
-    items.sort(key=lambda x: (0 if x.get("success") else 1, x.get("updated_at") or ""))
+    """以邮箱为 key 写 dict；未处理的不会出现。"""
+    data = {
+        item["email"]: item
+        for item in sorted(_results.values(), key=lambda x: x.get("email") or "")
+    }
     Path(path).write_text(
-        json.dumps(items, ensure_ascii=False, indent=2) + "\n",
+        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
 
@@ -602,7 +539,6 @@ def record_result(
     *,
     success: bool,
     sso: str = "",
-    sso_rw: str = "",
     password: str = "",
     error: str = "",
     result_json: str = RESULT_JSON,
@@ -612,7 +548,6 @@ def record_result(
         "email": email,
         "success": bool(success),
         "sso": sso or "",
-        "sso_rw": sso_rw or "",
         "password": password or "",
         "error": error or "",
         "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -643,7 +578,6 @@ def reset_one(
     password: str,
     mail: MailAdmin,
     action_get_num: str,
-    action_redirect: str,
     result_json: str,
 ) -> bool:
     if stop_event.is_set():
@@ -672,7 +606,7 @@ def reset_one(
         return fail(f"会话失败: {e}")
 
     try:
-        # 1) 文档第一步：触发重置（只发 1 封验证码，禁止再调 CreateEmailValidationCode）
+        # 1) 触发重置（只发 1 封验证码，禁止再调 CreateEmailValidationCode）
         sent_at = time.time()
         if not trigger_reset_password(session, email):
             return fail("触发重置失败")
@@ -688,23 +622,16 @@ def reset_one(
             # reset 接口也会校验；这里失败仍尝试一次，但记日志
             log(f"[!] {email} VerifyEmail 未通过，继续尝试设密")
 
-        # 4) 设新密码
+        # 4) 设新密码，响应里直接取 sso JWT（不再 redeem，避免多余验证码邮件）
         num_links = get_num_one_time_links(session, email, action_get_num)
-        sso_jwt, tokens = reset_password(session, email, code, password, num_links)
-        if not sso_jwt and not tokens:
+        sso_jwt = reset_password(session, email, code, password, num_links)
+        if not sso_jwt:
             return fail("重置密码失败")
-
-        # 5) 兑换 sso
-        sso, sso_rw = redeem_session(session, email, tokens, action_redirect)
-        final_sso = sso or sso_jwt
-        if not final_sso:
-            return fail("未拿到 sso")
 
         record_result(
             email,
             success=True,
-            sso=final_sso,
-            sso_rw=sso_rw or "",
+            sso=sso_jwt,
             password=password,
             result_json=result_json,
         )
@@ -758,9 +685,9 @@ def main():
         help="结果 JSON 路径，默认 email_sso.json",
     )
     parser.add_argument(
-        "--skip-success",
+        "--no-skip-success",
         action="store_true",
-        help="跳过结果文件中已成功的邮箱",
+        help="不跳过结果文件中已成功的邮箱（默认自动跳过）",
     )
     args = parser.parse_args()
 
@@ -784,7 +711,8 @@ def main():
     result_json = args.output or RESULT_JSON
     global _results
     _results = load_results(result_json)
-    if args.skip_success and _results:
+    # 默认跳过结果文件中已成功的邮箱（success=true），无记录或失败的一律继续
+    if not args.no_skip_success and _results:
         before = len(emails)
         emails = [
             e
@@ -809,14 +737,13 @@ def main():
     print(f"[*] 新密码: {password[:2]}{'*' * max(0, len(password) - 2)}")
     print(f"[*] 结果文件: {result_json}")
 
-    # 扫描 action id
+    # 扫描 getNumOneTimeLinks 的 action id（不带 email，避免额外触发重置邮件）
     try:
         session, imp = open_session()
         print(f"[+] 会话就绪 (impersonate={imp})")
-        action_get_num, action_redirect = discover_actions(session)
+        action_get_num = discover_get_num_action(session)
         session.close()
         print(f"[+] getNumOneTimeLinks: {action_get_num}")
-        print(f"[+] createSessionRedirectUrl: {action_redirect}")
     except Exception as e:
         print(f"[-] 初始化失败: {e}")
         return
@@ -830,7 +757,6 @@ def main():
                 password,
                 mail,
                 action_get_num,
-                action_redirect,
                 result_json,
             )
             for email in emails
