@@ -135,6 +135,29 @@ python3 grok_login.py -o keys/relogin.json
 python3 grok_login.py -o keys/relogin.json --resume
 ```
 
+### 协议登录（不打开账号登录浏览器）
+
+```bash
+# 未配置 YESCAPTCHA_KEY 时，先在另一个终端启动现有 Solver
+python api_solver.py --browser_type camoufox --thread 5 --debug
+
+# 使用已有密码，通过 CreateSession gRPC-Web 接口重新登录
+python3 grok_login_protocol.py -o keys/protocol_relogin.json
+
+# 中断后继续
+python3 grok_login_protocol.py -o keys/protocol_relogin.json --resume
+```
+
+邮箱和密码来源与浏览器版相同；支持 `-e`、`--credentials`、`-n 1`、`--timeout 30`
+和 `--solver-url`。JSON 结果和同名 TXT 中的 SSO 会逐个保存，连续 3 个账号失败就停止。
+登录请求使用 `curl_cffi`，验证码沿用本地 Solver 或 YesCaptcha；本地 Solver 自身仍使用浏览器。
+
+协议字段来自登录页公开的 protobuf 定义；2026-09-22 已通过本地 Solver 实测一个账号登录成功，
+取得已确认会话的 SSO，尚未验证整批账号。
+若服务端要求 Castle，需在 `--credentials` 指定的文件里为对应邮箱提供有效的
+`castle_request_token`；脚本不会生成该令牌。返回未确认会话（如邮箱验证或 MFA）会记为失败，
+需要用浏览器完成登录。该流程不调用重置密码接口。
+
 ## 注册输出示例
 
 ```text
