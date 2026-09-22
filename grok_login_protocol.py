@@ -11,7 +11,7 @@ from urllib.parse import unquote
 from curl_cffi import requests
 
 from g.turnstile_service import TurnstileService
-from grok_login import LOGIN_URL, account_password, read_records, save_results
+from grok_login import LOGIN_URL, account_password, load_login_emails, read_records, save_results
 from grok_reset_pwd import (
     DEFAULT_IMPERSONATE,
     PROXIES,
@@ -19,7 +19,6 @@ from grok_reset_pwd import (
     _enc_varint,
     enc_str,
     grpc_web_frame,
-    load_emails,
     parse_grpc_web_response,
 )
 
@@ -218,7 +217,7 @@ def main():
         parser.error("输出已存在，请换路径；继续上次登录请加 --resume")
     records = read_records(args.credentials)
     results = read_records(output) if args.resume else {}
-    emails = [email for email in load_emails(args.emails) if not (
+    emails = [email for email in load_login_emails(args.emails, records) if not (
         results.get(email.lower(), {}).get("success") and results.get(email.lower(), {}).get("sso")
     )]
     if args.limit:

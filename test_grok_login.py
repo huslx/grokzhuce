@@ -7,10 +7,23 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from grok_login import account_password, atomic_write, read_records, save_results
+from grok_login import account_password, atomic_write, load_login_emails, read_records, save_results
 
 
 class LoginStorageTest(unittest.TestCase):
+    def test_failed_reset_passwords_are_not_used_for_login(self):
+        records = {
+            "failed@example.com": {"success": False, "password": "never-applied"},
+            "ok@example.com": {"success": True, "password": "saved"},
+            "manual@example.com": {"password": "known"},
+        }
+        with patch("grok_login.load_emails", return_value=[
+            "FAILED@example.com", "ok@example.com", "manual@example.com", "env@example.com"
+        ]):
+            self.assertEqual(load_login_emails("unused.json", records), [
+                "ok@example.com", "manual@example.com", "env@example.com"
+            ])
+
     def test_credentials_and_safe_output(self):
         with tempfile.TemporaryDirectory() as directory:
             credentials = Path(directory) / "credentials.json"

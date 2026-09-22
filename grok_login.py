@@ -31,6 +31,14 @@ def account_password(email, records):
     return password
 
 
+def load_login_emails(path, records):
+    emails = load_emails(path)
+    eligible = [email for email in emails if records.get(email.lower(), {}).get("success") is not False]
+    if len(eligible) != len(emails):
+        print(f"跳过重置失败、密码未确认的账号: {len(emails) - len(eligible)}", flush=True)
+    return eligible
+
+
 def atomic_write(path, content):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -116,7 +124,7 @@ def main():
 
     records = read_records(args.credentials)
     results = read_records(output) if args.resume else {}
-    emails = load_emails(args.emails)
+    emails = load_login_emails(args.emails, records)
     emails = [email for email in emails if not (
         results.get(email.lower(), {}).get("success") and results.get(email.lower(), {}).get("sso")
     )]

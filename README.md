@@ -115,7 +115,8 @@ keys/grok_<时间戳>_<数量>.txt
 ## 已有账号重新登录
 
 使用 `email.json` 的邮箱和 `email_sso.json` 保存的密码重新登录；缺少密码时使用
-`.env` 的 `ACCOUNT_PASSWORD`。不会重置密码。需要安装 Google Chrome，以及项目已有的
+`.env` 的 `ACCOUNT_PASSWORD`。旧记录中 `success=false` 的账号会跳过，因为重置失败时
+保存的密码可能尚未生效；浏览器版和协议版均采用此规则。不会重置密码。需要安装 Google Chrome，以及项目已有的
 `patchright` 依赖（`pip install -r requirements.txt`）。
 
 ```bash
@@ -149,7 +150,8 @@ python3 grok_login_protocol.py -c 8 -o keys/protocol_relogin.json --resume
 ```
 
 `--resume` 只跳过指定结果 JSON 中 `success=true` 且 `sso` 非空的账号，不会重新验证
-这些 SSO 是否仍有效，也不依据旧的 `email_sso.json` 重置记录跳过账号。
+这些 SSO 是否仍有效。旧的 `email_sso.json` 重置成功记录不代表本次登录成功；
+但明确标记为重置失败（`success=false`）的账号始终跳过，避免使用未生效的密码。
 使用 `--resume` 时，必须用 `-o` 指定已经存在的结果文件。
 不加 `--resume` 时，如果指定的 JSON 或同名 TXT 已存在，脚本会报错退出，避免覆盖。
 不指定 `-o` 则每次创建带时间戳的新文件，不会跳过之前登录成功的账号。
