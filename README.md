@@ -142,14 +142,16 @@ python3 grok_login.py -o keys/relogin.json --resume
 python api_solver.py --browser_type camoufox --thread 5 --debug
 
 # 使用已有密码，通过 CreateSession gRPC-Web 接口重新登录
-python3 grok_login_protocol.py -o keys/protocol_relogin.json
+python3 grok_login_protocol.py -c 8 -o keys/protocol_relogin.json
 
 # 中断后继续
 python3 grok_login_protocol.py -o keys/protocol_relogin.json --resume
 ```
 
 邮箱和密码来源与浏览器版相同；支持 `-e`、`--credentials`、`-n 1`、`--timeout 30`
-和 `--solver-url`。JSON 结果和同名 TXT 中的 SSO 会逐个保存，连续 3 个账号失败就停止。
+和 `--solver-url`。默认 8 个账号并发，用 `-c/--concurrency` 调整，`-c 1` 为串行。
+JSON 结果和同名 TXT 中的 SSO 由主线程逐个保存；连续处理到 3 个失败结果或按 Ctrl+C 时，
+停止派发新账号，等待在途账号完成并保存。Solver 的 `--thread` 是独立的验证码并发数。
 登录请求使用 `curl_cffi`，验证码沿用本地 Solver 或 YesCaptcha；本地 Solver 自身仍使用浏览器。
 
 协议字段来自登录页公开的 protobuf 定义；2026-09-22 已通过本地 Solver 实测一个账号登录成功，

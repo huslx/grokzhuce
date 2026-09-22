@@ -1,13 +1,46 @@
 """离线协议检查：python3 -m unittest test_grok_login_protocol.py。"""
 
 import unittest
+import threading
 from unittest.mock import Mock, patch
 
-from grok_login_protocol import enc_message, login_one, login_payload, session_cookie
+from grok_login_protocol import LoginError, enc_message, login_accounts, login_one, login_payload, session_cookie
 from grok_reset_pwd import enc_str, grpc_web_frame
 
 
 class ProtocolLoginTest(unittest.TestCase):
+    def test_bounded_concurrency_and_serial_writes(self):
+        barrier = threading.Barrier(2, timeout=3)
+        lock = threading.Lock()
+        active = peak = 0
+        accounts = [(f"{index}@example.com", "password") for index in range(4)]
+        results = {}
+        writer_threads = []
+
+        def fake_login(email, *_):
+            nonlocal active, peak
+            with lock:
+                active += 1
+                peak = max(peak, active)
+            barrier.wait()
+            with lock:
+                active -= 1
+            return f"sso-{email}"
+
+        with patch("grok_login_protocol.login_one", side_effect=fake_login), patch(
+            "grok_login_protocol.save_results", side_effect=lambda *_: writer_threads.append(threading.get_ident())
+        ):
+            self.assertEqual(login_accounts(accounts, {}, Mock(), 30, 2, None, results), 0)
+        self.assertEqual(peak, 2)
+        self.assertEqual(len(results), 4)
+        self.assertTrue(all(record["success"] for record in results.values()))
+        self.assertEqual(writer_threads, [threading.get_ident()] * 4)
+        with patch("grok_login_protocol.login_one", side_effect=LoginError("failed")) as login, patch(
+            "grok_login_protocol.save_results"
+        ):
+            self.assertEqual(login_accounts(accounts, {}, Mock(), 30, 1, None, {}), 1)
+            self.assertEqual(login.call_count, 3)
+
     def test_password_request_and_confirmed_session(self):
         expected = bytes.fromhex("0000000016 0a0c 0a0a 0a056140622e63 120170 2203 0a0174 520163")
         self.assertEqual(login_payload("a@b.c", "p", "t", "c"), expected)

@@ -3,6 +3,7 @@
 
 import argparse
 import re
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import unquote
@@ -142,18 +143,69 @@ def login_one(email, password, solver, timeout, castle_token=""):
         return session_cookie(body)
 
 
+def login_accounts(accounts, records, solver, timeout, concurrency, output, results):
+    succeeded = failed = consecutive_failures = 0
+    stopped = interrupted = False
+    remaining = iter(accounts)
+    with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        pending = {}
+        while True:
+            try:
+                while not stopped and len(pending) < concurrency:
+                    account = next(remaining, None)
+                    if account is None:
+                        break
+                    email, password = account
+                    castle = records.get(email.lower(), {}).get("castle_request_token", "")
+                    future = pool.submit(login_one, email, password, solver, timeout, castle)
+                    pending[future] = email
+                    print(f"开始登录: {email}", flush=True)
+                if not pending:
+                    break
+                done, _ = wait(pending, return_when=FIRST_COMPLETED)
+                for future in done:
+                    email = pending[future]
+                    record = {"email": email, "success": False, "sso": "", "error": ""}
+                    try:
+                        record["sso"] = future.result()
+                        record["success"] = True
+                        succeeded += 1
+                        consecutive_failures = 0
+                        print(f"登录成功: {email}", flush=True)
+                    except Exception as error:
+                        # 第三方异常可能带请求上下文，只输出安全错误详情。
+                        record["error"] = str(error) if isinstance(error, LoginError) else f"请求失败: {type(error).__name__}，请检查网络和 Solver"
+                        failed += 1
+                        consecutive_failures += 1
+                        print(f"登录失败: {email} | {record['error']}", flush=True)
+                    record["updated_at"] = datetime.now(timezone.utc).isoformat()
+                    results[email.lower()] = record
+                    # 仅主线程落盘，工作线程不修改 results。
+                    save_results(output, results)
+                    del pending[future]
+                    if consecutive_failures >= 3 and not stopped:
+                        stopped = True
+                        print("连续处理到 3 个失败结果，停止派发新账号，等待在途账号保存。", flush=True)
+            except KeyboardInterrupt:
+                stopped = interrupted = True
+                print("\n停止派发新账号，等待在途账号完成并保存结果。", flush=True)
+    print(f"完成: 本次成功 {succeeded} / 失败 {failed}")
+    return 130 if interrupted else (1 if failed else 0)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("-e", "--emails", default="email.json")
     parser.add_argument("--credentials", default="email_sso.json", help="邮箱对应的已有密码记录")
     parser.add_argument("-n", "--limit", type=int, default=0, help="只处理前 N 个待登录账号，0=全部")
+    parser.add_argument("-c", "--concurrency", type=int, default=8, help="并发账号数，默认 8")
     parser.add_argument("-o", "--output", type=Path, help="新结果 JSON 路径")
     parser.add_argument("--resume", action="store_true", help="配合 -o 跳过已登录成功的账号")
     parser.add_argument("--timeout", type=int, default=30, help="登录 HTTP 请求超时秒数")
     parser.add_argument("--solver-url", default="http://127.0.0.1:5072")
     args = parser.parse_args()
-    if args.limit < 0 or args.timeout <= 0:
-        parser.error("limit 必须 >= 0，timeout 必须 > 0")
+    if args.limit < 0 or args.timeout <= 0 or args.concurrency <= 0:
+        parser.error("limit 必须 >= 0，timeout 和 concurrency 必须 > 0")
     if args.resume and (not args.output or not args.output.is_file()):
         parser.error("--resume 需要用 -o 指定已有协议登录结果 JSON")
     output = args.output or Path(f"keys/protocol_login_{datetime.now():%Y%m%d_%H%M%S_%f}.json")
@@ -174,32 +226,8 @@ def main():
     accounts = [(email, account_password(email, records)) for email in emails]
     save_results(output, results)
     solver = TurnstileService(solver_url=args.solver_url)
-    print(f"协议登录 {len(accounts)} 个账号 | 结果: {output} | SSO: {output.with_suffix('.txt')}", flush=True)
-    succeeded = failed = consecutive_failures = 0
-    for index, (email, password) in enumerate(accounts, 1):
-        print(f"[{index}/{len(accounts)}] {email}", flush=True)
-        record = {"email": email, "success": False, "sso": "", "error": ""}
-        try:
-            castle = records.get(email.lower(), {}).get("castle_request_token", "")
-            record["sso"] = login_one(email, password, solver, args.timeout, castle)
-            record["success"] = True
-            succeeded += 1
-            consecutive_failures = 0
-            print("    登录成功", flush=True)
-        except Exception as error:
-            # 第三方异常可能带请求上下文，只输出我们自己的安全错误详情。
-            record["error"] = str(error) if isinstance(error, LoginError) else f"请求失败: {type(error).__name__}，请检查网络和 Solver"
-            failed += 1
-            consecutive_failures += 1
-            print(f"    失败: {record['error']}", flush=True)
-        record["updated_at"] = datetime.now(timezone.utc).isoformat()
-        results[email.lower()] = record
-        save_results(output, results)
-        if consecutive_failures >= 3:
-            print("连续 3 个账号失败，已停止；请检查错误信息。", flush=True)
-            break
-    print(f"完成: 本次成功 {succeeded} / 失败 {failed}")
-    return 1 if failed else 0
+    print(f"协议登录 {len(accounts)} 个账号 | 并发: {args.concurrency} | 结果: {output} | SSO: {output.with_suffix('.txt')}", flush=True)
+    return login_accounts(accounts, records, solver, args.timeout, args.concurrency, output, results)
 
 
 if __name__ == "__main__":
