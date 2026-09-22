@@ -144,9 +144,15 @@ python api_solver.py --browser_type camoufox --thread 5 --debug
 # 使用已有密码，通过 CreateSession gRPC-Web 接口重新登录
 python3 grok_login_protocol.py -c 8 -o keys/protocol_relogin.json
 
-# 中断后继续
-python3 grok_login_protocol.py -o keys/protocol_relogin.json --resume
+# 重新运行：指定同一个结果文件，跳过成功账号，重试失败和未处理的账号
+python3 grok_login_protocol.py -c 8 -o keys/protocol_relogin.json --resume
 ```
+
+`--resume` 只跳过指定结果 JSON 中 `success=true` 且 `sso` 非空的账号，不会重新验证
+这些 SSO 是否仍有效，也不依据旧的 `email_sso.json` 重置记录跳过账号。
+使用 `--resume` 时，必须用 `-o` 指定已经存在的结果文件。
+不加 `--resume` 时，如果指定的 JSON 或同名 TXT 已存在，脚本会报错退出，避免覆盖。
+不指定 `-o` 则每次创建带时间戳的新文件，不会跳过之前登录成功的账号。
 
 邮箱和密码来源与浏览器版相同；支持 `-e`、`--credentials`、`-n 1`、`--timeout 30`
 和 `--solver-url`。默认 8 个账号并发，用 `-c/--concurrency` 调整，`-c 1` 为串行。
