@@ -112,7 +112,30 @@ python grok.py
 keys/grok_<时间戳>_<数量>.txt
 ```
 
-## 输出示例
+## 已有账号重新登录
+
+使用 `email.json` 的邮箱和 `email_sso.json` 保存的密码重新登录；缺少密码时使用
+`.env` 的 `ACCOUNT_PASSWORD`。不会重置密码。需要安装 Google Chrome，以及项目已有的
+`patchright` 依赖（`pip install -r requirements.txt`）。
+
+```bash
+python3 grok_login.py
+```
+
+脚本打开独立 Chrome 窗口，逐个账号登录。遇到人机验证或二次验证时，在窗口中手动完成。
+每个阶段默认等待 120 秒，可用 `--timeout 300` 延长；连续 3 个账号失败会停止。
+新结果保存至 `keys/login_<时间戳>.json`，新 SSO 同时导出到同名 `.txt`，旧密码记录不变。
+
+```bash
+# 先登录一个账号
+python3 grok_login.py -n 1
+
+# 指定结果文件；中断后使用同一文件继续，跳过已登录成功的账号
+python3 grok_login.py -o keys/relogin.json
+python3 grok_login.py -o keys/relogin.json --resume
+```
+
+## 注册输出示例
 
 ```text
 ============================================================
